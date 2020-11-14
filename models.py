@@ -35,7 +35,7 @@ class RNetwork(nn.Module):
 class QNetwork(nn.Module):
     """Actor (Policy) Model."""
 
-    def __init__(self, state_size, action_size, fc1_units=256,fc2_units=256, seed=0):
+    def __init__(self, state_size, action_size, fc1_units=64,fc2_units=64, fc3_units=64, seed=0):
         """Initialize parameters and build model.
         Params
         ======
@@ -46,21 +46,26 @@ class QNetwork(nn.Module):
             fc2_units (int): Number of nodes in second hidden layer
         """
         super(QNetwork, self).__init__()
+        print("fc1", fc1_units)
+        print("fc2", fc2_units)
+        print("fc3", fc3_units)
         self.seed = torch.manual_seed(seed)
         self.fc1 = nn.Linear(state_size, fc1_units)
         self.fc2 = nn.Linear(fc1_units, fc2_units)
-        self.fc3 = nn.Linear(fc2_units, action_size)
+        self.fc3 = nn.Linear(fc2_units, fc3_units)
+        self.fc4 = nn.Linear(fc3_units, action_size)
 
     def forward(self, state):
         """Build a network that maps state -> action values."""
         x = F.relu(self.fc1(state))
         x = F.relu(self.fc2(x))
-        return self.fc3(x)
+        x = F.relu(self.fc3(x))
+        return self.fc4(x)
 
 class Classifier(nn.Module):
     """ Classifier Model."""
 
-    def __init__(self, state_size, action_dim,  fc1_units=256*4,fc2_units=256*4, seed=0):
+    def __init__(self, state_size, action_dim, seed, fc1_units=256,fc2_units=256):
         """Initialize parameters and build model.
         Params
         ======

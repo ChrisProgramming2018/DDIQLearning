@@ -5,7 +5,7 @@ import random
 import gym
 import gym.wrappers
 from collections import namedtuple, deque
-from models import QNetwork, Classifier, RNetwork
+from models import QNetwork, Classifier, RNetwork, DQNetwork
 import torch
 import torch.nn  as nn
 import torch.nn.functional as F
@@ -15,10 +15,30 @@ from torch.autograd import Variable
 torch.set_printoptions(threshold=5000)
 import logging
 from datetime import datetime
-import time
 
 
-logging.basicConfig(filename="test.log", level=logging.DEBUG)
+
+
+
+
+def mkdir(base, name):
+    """
+    Creates a direction if its not exist
+    Args:
+       param1(string): base first part of pathname
+       param2(string): name second part of pathname
+    Return: pathname
+    """
+    path = os.path.join(base, name)
+    if not os.path.exists(path):
+        os.makedirs(path)
+    return path
+
+
+now = datetime.now()    
+dt_string = now.strftime("%d_%m_%Y_%H:%M:%S")
+mkdir("","search_results")
+logging.basicConfig(filename="search_results/{}.log".format(dt_string), level=logging.DEBUG)
 
 
 
@@ -31,37 +51,47 @@ class Agent():
         self.env_name = config["env_name"]
         self.state_size = state_size
         self.action_size = action_size
-        self.seed = 0
+        self.seed = config["seed"]
+        self.clip = config["clip"]
         self.device = 'cuda'
+        print("Clip ", self.clip)
         print("cuda ", torch.cuda.is_available())
+        self.double_dqn = config["DDQN"]
+        print("Use double dqn", self.double_dqn)
         self.lr_pre = config["lr_pre"]
         self.batch_size = config["batch_size"]
         self.lr = config["lr"]
         self.tau = config["tau"]
+        print("self tau", self.tau)
         self.gamma = 0.99
         self.fc1 = config["fc1_units"]
         self.fc2 = config["fc2_units"]
-        self.qnetwork_local = QNetwork(state_size, action_size, self.fc1, self.fc2, self.seed).to(self.device)
-        self.qnetwork_target = QNetwork(state_size, action_size, self.fc1, self.fc2, self.seed).to(self.device)
+        self.fc3 = config["fc3_units"]
+        self.qnetwork_local = QNetwork(state_size, action_size, self.fc1, self.fc2, self.fc3, self.seed).to(self.device)
+        self.qnetwork_target = QNetwork(state_size, action_size, self.fc1, self.fc2,self.fc3,  self.seed).to(self.device)
         self.optimizer = optim.Adam(self.qnetwork_local.parameters(), lr=self.lr)
-        self.soft_update(self.qnetwork_local, self.qnetwork_target, 1e-5)
+        self.soft_update(self.qnetwork_local, self.qnetwork_target, 1)
         
-        self.q_shift_local = QNetwork(state_size, action_size, self.fc1, self.fc2, self.seed).to(self.device)
-        self.q_shift_target = QNetwork(state_size, action_size, self.fc1, self.fc2, self.seed).to(self.device)
-        self.optimizer_shift = optim.Adam(self.q_shift_local.parameters(), lr=1e-5)
+        self.q_shift_local = QNetwork(state_size, action_size, self.fc1, self.fc2, self.fc3, self.seed).to(self.device)
+        self.q_shift_target = QNetwork(state_size, action_size, self.fc1, self.fc2, self.fc3, self.seed).to(self.device)
+        self.optimizer_shift = optim.Adam(self.q_shift_local.parameters(), lr=self.lr)
         self.soft_update(self.q_shift_local, self.q_shift_target, 1)
          
-        self.R_local = QNetwork(state_size, action_size, self.fc1, self.fc2, self.seed).to(self.device)
-        self.R_target = QNetwork(state_size, action_size, self.fc1, self.fc2, self.seed).to(self.device)
-        self.optimizer_r = optim.Adam(self.R_local.parameters(), lr=1e-5)
-        self.soft_update(self.R_local, self.R_target, 1)
-        
+        self.R_local = QNetwork(state_size, action_size, self.fc1, self.fc2, self.fc3,  self.seed).to(self.device)
+        self.R_target = QNetwork(state_size, action_size, self.fc1, self.fc2, self.fc3, self.seed).to(self.device)
+        self.optimizer_r = optim.Adam(self.R_local.parameters(), lr=self.lr)
+        self.soft_update(self.R_local, self.R_target, 1) 
+
+        self.expert_q = DQNetwork(state_size, action_size, seed=self.seed).to(self.device)
+        self.expert_q.load_state_dict(torch.load('checkpoint.pth'))
         self.memory = Memory(action_size, config["buffer_size"], self.batch_size, self.seed, self.device)
         self.t_step = 0
         self.steps = 0
-        self.predicter = Classifier(state_size, action_size, seed=self.seed).to(self.device)
+        self.predicter = Classifier(state_size, action_size, self.seed).to(self.device)
         self.optimizer_pre = optim.Adam(self.predicter.parameters(), lr=self.lr_pre)
-        pathname = "lr {} batch_size {} fc1 {}  fc2 {} seed {}".format(self.lr, self.batch_size,  self.fc1, self.fc2, self.seed)
+        pathname = "lr_{}_batch_size_{}_fc1_{}_fc2_{}_fc3_{}_seed_{}".format(self.lr, self.batch_size, self.fc1, self.fc2, self.fc3, self.seed)
+        pathname += "_clip_{}".format(config["clip"])
+        pathname += "_tau_{}".format(config["tau"])
         now = datetime.now()    
         dt_string = now.strftime("%d_%m_%Y_%H:%M:%S")
         pathname += dt_string
@@ -86,7 +116,11 @@ class Agent():
             for a in range(self.action_size):
                 action =  torch.ones([self.batch_size, 1], device= self.device) * a
                 self.compute_r_function(states, action)
+
         self.compute_q_function(states, next_states, actions, dones)
+        self.soft_update(self.q_shift_local, self.q_shift_target, self.tau)
+        self.soft_update(self.R_local, self.R_target, self.tau)
+        self.soft_update(self.qnetwork_local, self.qnetwork_target, self.tau)
         return
     
     def learn_predicter(self, memory):
@@ -98,10 +132,7 @@ class Agent():
     
     def state_action_frq(self, states, action):
         """ Train classifer to compute state action freq
-        """
-        self.steps +=1
-        #output = self.predicter(states.unsqueeze(0), train=True)
-        
+        """ 
         self.predicter.train()
         output = self.predicter(states, train=True)
         output = output.squeeze(0)
@@ -158,9 +189,14 @@ class Agent():
         # output = output.squeeze(0)
         action_prob = output.gather(1, actions)
         action_prob = action_prob + torch.finfo(torch.float32).eps
+        
+        # check if one action if its to small
+        if action_prob.shape[0] == 1:
+            if action_prob.cpu().detach().numpy()[0][0] < 1e-4:
+                return None
         # logging.debug("action_prob {})".format(action_prob))
         action_prob = torch.log(action_prob)
-        action_prob = torch.clamp(action_prob, min= -1, max=0)
+        action_prob = torch.clamp(action_prob, min= self.clip, max=0)
         return action_prob
 
     def compute_shift_function(self, states, next_states, actions, dones):
@@ -173,9 +209,12 @@ class Agent():
         actions = actions.type(torch.int64)
         with torch.no_grad():
             # Get max predicted Q values (for next states) from target model
-            qt = self.q_shift_local(next_states)
-            max_q, max_actions = qt.max(1)
-            Q_targets_next = self.qnetwork_target(next_states).gather(1, max_actions.unsqueeze(1))
+            if self.double_dqn:
+                qt = self.q_shift_local(next_states)
+                max_q, max_actions = qt.max(1)
+                Q_targets_next = self.qnetwork_target(next_states).gather(1, max_actions.unsqueeze(1))
+            else:
+                Q_targets_next = self.qnetwork_target(next_states).max(1)[0].unsqueeze(1)
             # Compute Q targets for current states
             Q_targets = (self.gamma * Q_targets_next * (dones))
 
@@ -190,8 +229,6 @@ class Agent():
         self.writer.add_scalar('Shift_loss', loss, self.steps)
         self.optimizer_shift.step()
 
-        # ------------------- update target network ------------------- #
-        self.soft_update(self.q_shift_local, self.q_shift_target)
 
     def compute_r_function(self, states, actions, debug=False, log=False):
         """
@@ -216,8 +253,10 @@ class Agent():
                 for b in self.all_actions:
                     b = b.type(torch.int64).unsqueeze(1)
                     n_b = self.get_action_prob(s.unsqueeze(0), b)
-                    if torch.eq(a, b):
-                        #print(n_b)
+                    if torch.eq(a, b) or n_b is None:
+                        logging.debug("best action ", a)
+                        logging.debug("n_b action ", b)
+                        logging.debug("n_b", n_b)
                         continue
                     taken_actions += 1
                     r_hat = self.R_target(s.unsqueeze(0)).gather(1, b)
@@ -268,7 +307,7 @@ class Agent():
             print("after update r pre ", self.R_local(states).gather(1, actions).item())
             print("after update r target ", self.R_target(states).gather(1, actions).item())
         # ------------------- update target network ------------------- #
-        self.soft_update(self.R_local, self.R_target, 5e-3)
+        #self.soft_update(self.R_local, self.R_target, 5e-3)
         if debug:
             print("after soft upda r target ", self.R_target(states).gather(1, actions).item())
     
@@ -286,9 +325,12 @@ class Agent():
             print("state ", states)
         with torch.no_grad():
             # Get max predicted Q values (for next states) from target model
-            qt = self.q_shift_local(next_states)
-            max_q, max_actions = qt.max(1)
-            Q_targets_next = self.qnetwork_target(next_states).gather(1, max_actions.unsqueeze(1))
+            if self.double_dqn:
+                qt = self.qnetwork_local(next_states)
+                max_q, max_actions = qt.max(1)
+                Q_targets_next = self.qnetwork_target(next_states).gather(1, max_actions.unsqueeze(1))
+            else:
+                Q_targets_next = self.qnetwork_target(next_states).max(1)[0].unsqueeze(1)
             # Compute Q targets for current states
             rewards = self.R_target(states).gather(1, actions)
             Q_targets = rewards + (self.gamma * Q_targets_next * (dones))
@@ -319,7 +361,6 @@ class Agent():
 
 
         # ------------------- update target network ------------------- #
-        self.soft_update(self.qnetwork_local, self.qnetwork_target)
 
 
 
@@ -355,19 +396,39 @@ class Agent():
 
     def test_policy(self):
         env =  gym.make('LunarLander-v2')
-        state = env.reset()
-        score = 0
-        for t in range(200):
-            state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
-            q_values = self.qnetwork_local(state)
-            action = torch.argmax(q_values).item()
-            next_state, reward, done, _ = env.step(action)
-            state = next_state
-            score += reward
-            if done:
-                print("score", score)
-                self.writer.add_scalar('score', score, self.steps)
-                break
+        logging.debug("new episode")
+        average_score = [] 
+        average_steps = []
+        average_action = []
+        for i in range(5):
+            state = env.reset()
+            score = 0
+            same_action = 0
+            logging.debug("new episode")
+            for t in range(200):
+                state = torch.from_numpy(state).float().unsqueeze(0).to(self.device)
+                q_expert = self.expert_q(state)
+                q_values = self.qnetwork_local(state)
+                logging.debug("q expert a0: {:.2f} a1: {:.2f} a2: {:.2f} a3: {:.2f}".format(q_expert.data[0][0], q_expert.data[0][1], q_expert.data[0][2], q_expert.data[0][3]))
+                logging.debug("q values a0: {:.2f} a1: {:.2f} a2: {:.2f} a3: {:.2f}  )".format(q_values.data[0][0], q_values.data[0][1], q_values.data[0][2], q_values.data[0][3]))
+                action = torch.argmax(q_values).item()
+                action_e = torch.argmax(q_expert).item()
+                if action == action_e:
+                    same_action += 1
+                next_state, reward, done, _ = env.step(action)
+                state = next_state
+                score += reward
+                if done:
+                    average_score.append(score)
+                    average_steps.append(t)
+                    average_action.append(same_action)
+                    break
+        mean_steps = np.mean(average_steps)
+        mean_score = np.mean(average_score)
+        mean_action= np.mean(average_action)
+        self.writer.add_scalar('Ave_epsiode_length', mean_steps , self.steps)
+        self.writer.add_scalar('Ave_same_action', mean_action, self.steps)
+        self.writer.add_scalar('Ave_score', mean_score, self.steps)
 
 
     def step(self, state, action, reward, next_state, done):
@@ -447,6 +508,7 @@ class Agent():
         test_elements = memory.idx
         all_diff = 0
         error = True
+        self.predicter.eval()
         for i in range(test_elements):
             # print("lop", i)
             states = memory.obses[i]
@@ -458,7 +520,7 @@ class Agent():
             actions = torch.as_tensor(actions, device=self.device)
             dones = torch.as_tensor(dones, device=self.device)
             with torch.no_grad():
-                output = self.predicter(states, train=True)
+                output = self.predicter(states)
                 output = F.softmax(output, dim=1)
                 q_values = self.qnetwork_local(states)
                 best_action = torch.argmax(q_values).item()
@@ -523,8 +585,8 @@ class Agent():
                     print("best action q ", best_action)
                     print(i)
                     error = False
-                # logging.debug("experte action  {} q fun {}".format(actions.item(), q_values))
                 continue
+                # logging.debug("experte action  {} q fun {}".format(actions.item(), q_values))
                 print("-------------------------------------------------------------------------------")
                 print("state ", i)
                 print("expert ", actions)
@@ -539,9 +601,10 @@ class Agent():
         av_action = np.mean(self.average_same_action)
         self.writer.add_scalar('Same_action', same_action, self.steps)
         print("Same actions {}  of {}".format(same_action, test_elements))
+        self.predicter.train()
 
 
-    def soft_update(self, local_model, target_model, tau=None):
+    def soft_update(self, local_model, target_model, tau=4):
         """Soft update model parameters.
         θ_target = τ*θ_local + (1 - τ)*θ_target
         Params
@@ -550,8 +613,7 @@ class Agent():
             target_model (PyTorch model): weights will be copied to
             tau (float): interpolation parameter
         """
-        if tau is None:
-            tau = self.tau
+        # print("use tau", tau)
         for target_param, local_param in zip(target_model.parameters(), local_model.parameters()):
             target_param.data.copy_(tau * local_param.data + (1.0 - tau) * target_param.data)
     
@@ -562,8 +624,8 @@ class Agent():
         mkdir("", filename)
         torch.save(self.predicter.state_dict(), filename + "_predicter.pth")
         torch.save(self.optimizer_pre.state_dict(), filename + "_predicter_optimizer.pth")
+        torch.save(self.qnetwork_local.state_dict(), filename + "_q_net.pth")
         """
-        torch.save(self.Q_local.state_dict(), filename + "_q_net.pth")
         torch.save(self.optimizer_q.state_dict(), filename + "_q_net_optimizer.pth")
         torch.save(self.q_shift_local.state_dict(), filename + "_q_shift_net.pth")
         torch.save(self.optimizer_q_shift.state_dict(), filename + "_q_shift_net_optimizer.pth")
@@ -575,21 +637,6 @@ class Agent():
         self.optimizer_pre.load_state_dict(torch.load(filename + "_predicter_optimizer.pth"))
         print("Load models to {}".format(filename))
         
-
-def mkdir(base, name):
-    """
-    Creates a direction if its not exist
-    Args:
-       param1(string): base first part of pathname
-       param2(string): name second part of pathname
-    Return: pathname
-    """
-    path = os.path.join(base, name)
-    if not os.path.exists(path):
-        os.makedirs(path)
-    return path
-
-
 
 
 
@@ -643,6 +690,7 @@ class Memory:
     def __len__(self):
         """Return the current size of internal memory."""
         return len(self.memory)
+
 
 
 
