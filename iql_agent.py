@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 import numpy as np
 import random
 import gym
@@ -186,10 +187,10 @@ class Agent():
         # check if action prob is zero
         output = self.predicter(states)
         output = F.softmax(output, dim=1)
+        # print("get action_prob ", output) 
         # output = output.squeeze(0)
         action_prob = output.gather(1, actions)
         action_prob = action_prob + torch.finfo(torch.float32).eps
-        
         # check if one action if its to small
         if action_prob.shape[0] == 1:
             if action_prob.cpu().detach().numpy()[0][0] < 1e-4:
@@ -235,7 +236,6 @@ class Agent():
 
         """
         actions = actions.type(torch.int64)
-        y = self.R_local(states).gather(1, actions)
         
         # sum all other actions
         # print("state shape ", states.shape)
@@ -245,6 +245,12 @@ class Agent():
         with torch.no_grad():
             y_shift = self.q_shift_target(states).gather(1, actions)
             log_a = self.get_action_prob(states, actions)
+            index_list = index_None_value(log_a)
+            # print("is none", index_list)
+            if index_list is None:
+                return
+
+
             y_r_part1 = log_a - y_shift
             y_r_part2 =  torch.empty((size, 1), dtype=torch.float32).to(self.device)
             for a, s in zip(actions, states):
@@ -254,9 +260,9 @@ class Agent():
                     b = b.type(torch.int64).unsqueeze(1)
                     n_b = self.get_action_prob(s.unsqueeze(0), b)
                     if torch.eq(a, b) or n_b is None:
-                        logging.debug("best action ", a)
-                        logging.debug("n_b action ", b)
-                        logging.debug("n_b", n_b)
+                        logging.debug("best action {} ".format(a))
+                        logging.debug("n_b action {} ".format(b))
+                        logging.debug("n_b {} ".format(n_b))
                         continue
                     taken_actions += 1
                     r_hat = self.R_target(s.unsqueeze(0)).gather(1, b)
@@ -270,8 +276,6 @@ class Agent():
                         print("r_pre {:.3f}".format(r_hat.item()))
                         print("n_b {:.3f}".format(n_b.item()))
                 if taken_actions == 0:
-                    y_r_part2[idx] = 0
-                    y_r_part1[idx] = y[idx].detach()
                     all_zeros.append(idx)
                 else:
                     y_r_part2[idx] = (1. / taken_actions)  * y_h
@@ -280,8 +284,9 @@ class Agent():
             y_r = y_r_part1 + y_r_part2
             #print("_________________")
             #print("r update zeros ", len(all_zeros))
-
-
+        if len(index_list) > 0:
+            print("none list", index_list)
+        y = self.R_local(states).gather(1, actions)
         if log:
             text = "Action {:.2f}  y target {:.2f} =  n_a {:.2f} + {:.2f} and pre{:.2f}".format(actions.item(), y_r.item(), y_r_part1.item(), y_r_part2.item(), y.item())
             logging.debug(text)
@@ -295,7 +300,13 @@ class Agent():
             print("Correct action target {:.3f} ".format(y_r.item()))
             print("part1 corret action {:.2f} ".format(y_r_part1.item()))
             print("part2 incorret action {:.2f} ".format(y_r_part2.item()))
+        
+        #print("y", y.shape)
+        #print("y_r", y_r.shape)
+        
         r_loss = F.mse_loss(y, y_r)
+        
+        #con = input()
         #sys.exit()
         # Minimize the loss
         self.optimizer_r.zero_grad()
@@ -523,6 +534,9 @@ class Agent():
                 output = self.predicter(states)
                 output = F.softmax(output, dim=1)
                 q_values = self.qnetwork_local(states)
+                expert_values = self.expert_q(states)
+                print("q values ", q_values)
+                print("ex values  ", expert_values)
                 best_action = torch.argmax(q_values).item()
                 actions = actions.type(torch.int64)
                 q_max = q_values.max(1)
@@ -546,6 +560,7 @@ class Agent():
                 logging.debug("q target a0: {:.2f} a1: {:.2f} a2: {:.2f} a3: {:.2f}  )".format(qt.data[0][0], qt.data[0][1], qt.data[0][2], qt.data[0][3]))
                 logging.debug("rewards a0: {:.2f} a1: {:.2f} a2: {:.2f} a3: {:.2f}  )".format(r.data[0][0], r.data[0][1], r.data[0][2], r.data[0][3]))
                 logging.debug("re target a0: {:.2f} a1: {:.2f} a2: {:.2f} a3: {:.2f}  )".format(rt.data[0][0], rt.data[0][1], rt.data[0][2], rt.data[0][3]))
+                """ 
                 logging.debug("---------Reward Function------------")
                 action = torch.Tensor(1) * 0 +  0
                 self.compute_r_function(states, action.unsqueeze(0).to(self.device), log= True)
@@ -564,7 +579,7 @@ class Agent():
                 self.compute_q_function(states, next_states.unsqueeze(0), action.unsqueeze(0).to(self.device), dones, log= True)
                 action = torch.Tensor(1) * 0 +  3
                 self.compute_q_function(states, next_states.unsqueeze(0), action.unsqueeze(0).to(self.device), dones, log= True)
-                
+                """
                 
 
             if  actions.item() == best_action:
@@ -639,6 +654,23 @@ class Agent():
         
 
 
+
+
+
+
+def index_None_value(matrix):
+    """
+    Search tensor for None Value and return list of the index
+    assume  
+    """
+    res = []
+    numb_rows = matrix.shape[0]
+    # print("check for none", matrix.shape)
+    for idx in range(numb_rows):
+        # print(matrix[idx])
+        if matrix[idx] is None:
+            res.append(idx)
+    return res
 
 
 class Memory:

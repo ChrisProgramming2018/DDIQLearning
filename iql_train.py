@@ -52,7 +52,8 @@ def train(env, config):
             if t % 100 == 0:
                 print(text)
                 agent.test_predicter(memory)
-                agent.test_policy()
+                agent.test_q_value(memory)
+                # agent.test_policy()
 
     if config["mode"] == "dqn":
         print("mode dqn")
